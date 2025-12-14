@@ -9,8 +9,8 @@ import os
 class SimpleNet(nn.Module):
     def __init__(self):
         super(SimpleNet, self).__init__()
-        self.fc1 = nn.Linear(784, 16, bias=True)
-        self.fc2 = nn.Linear(16, 10, bias=True)
+        self.fc1 = nn.Linear(784, 6, bias=True)  # 6个隐藏层神经元，平衡准确率和资源
+        self.fc2 = nn.Linear(6, 10, bias=True)
 
     def forward(self, x):
         x = x.view(-1, 784)
@@ -39,8 +39,8 @@ def train_model():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    # 训练5个epoch
-    for epoch in range(5):
+    # 训练12个epoch
+    for epoch in range(12):
         model.train()
         for batch_idx, (data, target) in enumerate(train_loader):
             optimizer.zero_grad()
@@ -75,6 +75,9 @@ def int8_inference(image, params, debug=False):
     fc2_w = params['fc2_weight']
     fc2_b = params['fc2_bias']
 
+    # 自动获取隐藏层大小
+    hidden_size = fc1_w.shape[0]
+
     # 展平图像并转换为0/1
     x = image.flatten()
 
@@ -83,8 +86,8 @@ def int8_inference(image, params, debug=False):
         print(f"输入图像非零像素数: {np.sum(x > 0)}")
 
     # 第一层计算（使用Int32中间结果）
-    layer1_out = np.zeros(16, dtype=np.int32)
-    for i in range(16):
+    layer1_out = np.zeros(hidden_size, dtype=np.int32)
+    for i in range(hidden_size):
         acc = int(fc1_b[i])
         for j in range(784):
             acc += int(fc1_w[i, j]) * int(x[j])
@@ -98,7 +101,7 @@ def int8_inference(image, params, debug=False):
     layer2_out = np.zeros(10, dtype=np.int32)
     for i in range(10):
         acc = int(fc2_b[i])
-        for j in range(16):
+        for j in range(hidden_size):
             acc += (int(fc2_w[i, j]) * layer1_out[j]) >> 7
         layer2_out[i] = acc
 
@@ -184,6 +187,9 @@ def fine_tune_int8(params, iterations=3):
     ])
     train_dataset = datasets.MNIST('./data', train=True, transform=transform)
 
+    # 获取隐藏层大小
+    hidden_size = params['fc2_weight'].shape[1]
+
     best_params = {k: v.copy() for k, v in params.items() if k != 'scales'}
     best_accuracy = validate_int8_model(best_params)
 
@@ -197,7 +203,7 @@ def fine_tune_int8(params, iterations=3):
         # 随机调整第二层的一些权重（影响较大）
         for _ in range(5):
             i = np.random.randint(0, 10)
-            j = np.random.randint(0, 16)
+            j = np.random.randint(0, hidden_size)
             delta = np.random.choice([-1, 1])
             new_val = int(test_params['fc2_weight'][i, j]) + delta
             if -128 <= new_val <= 127:
@@ -225,18 +231,36 @@ def fine_tune_int8(params, iterations=3):
     return best_params
 
 def generate_verilog(params):
-    """生成Verilog代码"""
-    print("\n生成Verilog代码...")
+    """生成串行计算架构的Verilog代码 - 大幅减少逻辑门数量"""
+    print("\n生成串行计算架构Verilog代码（优化逻辑门使用）...")
 
     fc1_w = params['fc1_weight']  # shape: (16, 784)
     fc1_b = params['fc1_bias']    # shape: (16,)
     fc2_w = params['fc2_weight']  # shape: (10, 16)
     fc2_b = params['fc2_bias']    # shape: (10,)
 
-    # 生成主模块
-    verilog_code = """// MNIST手写数字识别模型 - Int8量化版本
+    hidden_size = fc1_w.shape[0]  # 自动获取隐藏层大小
+
+    # ROM布局计算
+    # Layer1权重: [0..N-1] = hidden_size×784
+    # Layer1偏置: [N..N+hidden_size-1] = hidden_size个
+    # Layer2权重: [N+hidden_size..N+hidden_size+10*hidden_size-1] = 10×hidden_size
+    # Layer2偏置: [N+hidden_size+10*hidden_size..N+hidden_size+10*hidden_size+9] = 10个
+    layer1_weights_size = hidden_size * 784
+    layer1_bias_start = layer1_weights_size
+    layer2_weights_start = layer1_bias_start + hidden_size
+    layer2_bias_start = layer2_weights_start + 10 * hidden_size
+    total_rom_size = layer2_bias_start + 10
+
+    verilog_code = f"""// MNIST手写数字识别模型 - Int8量化版本（串行计算架构）
+// 架构优化：使用单个MAC单元串行计算，大幅减少逻辑门数量
+// 网络结构: 784 → {hidden_size} → 10 (隐藏层神经元: {hidden_size})
 // 输入: 28x28二值图像 (784位)
 // 输出: 预测数字 (0-9)
+// 时钟周期: ~{hidden_size * 785 + 10 * (hidden_size + 1)} cycles
+// ROM大小: {total_rom_size} bytes (Layer1: {layer1_bias_start + hidden_size}, Layer2: {10 * hidden_size + 10})"""
+
+    verilog_code += """
 
 module mnist_model(
     input wire clk,
@@ -248,106 +272,153 @@ module mnist_model(
 );
 
     // 状态机
-    localparam IDLE = 2'd0;
-    localparam LAYER1 = 2'd1;
-    localparam LAYER2 = 2'd2;
-    localparam DONE = 2'd3;
+    localparam IDLE = 3'd0;
+    localparam LAYER1_COMPUTE = 3'd1;
+    localparam LAYER1_ACTIVATE = 3'd2;
+    localparam LAYER2_COMPUTE = 3'd3;
+    localparam ARGMAX = 3'd4;
+    localparam DONE = 3'd5;
 
-    reg [1:0] state;
-    reg [9:0] counter;
+    reg [2:0] state;
+    reg [4:0] neuron_idx;       // 当前神经元索引
+    reg [9:0] input_idx;        // 当前输入索引 (0-783 for layer1)
 
-    // 第一层输出 (16个神经元)
-    reg signed [31:0] layer1_out [0:15];
+    // MAC单元
+    reg signed [31:0] accumulator; // 累加器（32位，保证数值稳定性）
 
-    // 第二层输出 (10个神经元)
-    reg signed [31:0] layer2_out [0:9];
+    // 层输出存储
+    reg signed [31:0] layer1_out [0:"""
 
-    integer i;
+    verilog_code += f"{hidden_size-1}];\n"
+    verilog_code += f"""    reg signed [31:0] layer2_out [0:9];
 
+    // ROM: 存储所有权重和偏置 ({total_rom_size}个Int8参数)
+    // synthesis attribute: 强制使用Block RAM而不是分布式RAM
+    (* ram_style = "block" *) reg signed [7:0] weight_rom [0:{total_rom_size-1}];
+
+    // 初始化ROM
+    initial begin
+"""
+
+    # 生成Layer1权重ROM
+    rom_addr = 0
+    for neuron in range(hidden_size):
+        for inp in range(784):
+            w = int(fc1_w[neuron, inp])
+            verilog_code += f"        weight_rom[{rom_addr}] = {w};\n"
+            rom_addr += 1
+
+    # Layer1偏置
+    for neuron in range(hidden_size):
+        b = int(fc1_b[neuron])
+        verilog_code += f"        weight_rom[{rom_addr}] = {b};\n"
+        rom_addr += 1
+
+    # Layer2权重
+    for neuron in range(10):
+        for inp in range(hidden_size):
+            w = int(fc2_w[neuron, inp])
+            verilog_code += f"        weight_rom[{rom_addr}] = {w};\n"
+            rom_addr += 1
+
+    # Layer2偏置
+    for neuron in range(10):
+        b = int(fc2_b[neuron])
+        verilog_code += f"        weight_rom[{rom_addr}] = {b};\n"
+        rom_addr += 1
+
+    verilog_code += """    end
+
+    // 主状态机和MAC单元
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             state <= IDLE;
             valid <= 0;
             digit_out <= 0;
-            counter <= 0;
+            neuron_idx <= 0;
+            input_idx <= 0;
+            accumulator <= 0;
         end else begin
             case (state)
                 IDLE: begin
                     valid <= 0;
+                    digit_out <= 0;
+                    neuron_idx <= 0;
+                    input_idx <= 0;
                     if (start) begin
-                        state <= LAYER1;
-                        counter <= 0;
+                        state <= LAYER1_COMPUTE;
+                        // 初始化累加器为第一个神经元的偏置
+                        accumulator <= $signed(weight_rom[""" + str(layer1_bias_start) + """]);
                     end
                 end
 
-                LAYER1: begin
-                    // 计算第一层（简化：直接计算所有神经元）
-                    if (counter == 0) begin
-"""
+                LAYER1_COMPUTE: begin
+                    // MAC操作: accumulator += weight * input
+                    // 读取Layer1权重: 地址 = neuron_idx * 784 + input_idx
+                    accumulator <= accumulator + ($signed(weight_rom[neuron_idx * 784 + input_idx]) * $signed({31'b0, image_in[input_idx]}));
 
-    # 生成第一层的计算（16个神经元）
-    for neuron_idx in range(16):
-        verilog_code += f"                        layer1_out[{neuron_idx}] = "
-
-        # 偏置项
-        bias_val = int(fc1_b[neuron_idx])
-        verilog_code += f"{bias_val}"
-
-        # 权重项 - 只为非零输入添加项
-        # 为了控制表达式长度，我们每32个输入换一行
-        for input_idx in range(784):
-            weight_val = int(fc1_w[neuron_idx, input_idx])
-            if weight_val != 0:
-                sign = "+" if weight_val >= 0 else ""
-                if (input_idx % 32 == 0 and input_idx > 0):
-                    verilog_code += f"\n                            {sign}{weight_val} * image_in[{input_idx}]"
-                else:
-                    verilog_code += f" {sign}{weight_val} * image_in[{input_idx}]"
-
-        verilog_code += ";\n"
-
-        # 添加ReLU激活
-        verilog_code += f"                        if (layer1_out[{neuron_idx}] < 0) layer1_out[{neuron_idx}] = 0;\n"
-
-    verilog_code += """                        counter <= counter + 1;
+                    if (input_idx == 783) begin
+                        // 当前神经元计算完成，进入激活
+                        state <= LAYER1_ACTIVATE;
+                        input_idx <= 0;
                     end else begin
-                        state <= LAYER2;
-                        counter <= 0;
+                        // 继续计算下一个输入
+                        input_idx <= input_idx + 1;
                     end
                 end
 
-                LAYER2: begin
-                    // 计算第二层（10个神经元）
-                    if (counter == 0) begin
-"""
-
-    # 生成第二层的计算（10个神经元）
-    for neuron_idx in range(10):
-        verilog_code += f"                        layer2_out[{neuron_idx}] = "
-
-        # 偏置项
-        bias_val = int(fc2_b[neuron_idx])
-        verilog_code += f"{bias_val}"
-
-        # 权重项
-        for input_idx in range(16):
-            weight_val = int(fc2_w[neuron_idx, input_idx])
-            if weight_val != 0:
-                if weight_val >= 0:
-                    verilog_code += f" + (({weight_val} * layer1_out[{input_idx}]) >>> 7)"
-                else:
-                    verilog_code += f" - (({-weight_val} * layer1_out[{input_idx}]) >>> 7)"
-
-        verilog_code += ";\n"
-
-    verilog_code += """                        counter <= counter + 1;
+                LAYER1_ACTIVATE: begin
+                    // ReLU激活
+                    if (accumulator < 0) begin
+                        layer1_out[neuron_idx] <= 0;
                     end else begin
-                        state <= DONE;
+                        layer1_out[neuron_idx] <= accumulator;
+                    end
+
+                    if (neuron_idx == """ + str(hidden_size - 1) + """) begin
+                        // Layer1完成，进入Layer2
+                        state <= LAYER2_COMPUTE;
+                        neuron_idx <= 0;
+                        input_idx <= 0;
+                        // 初始化为Layer2第一个神经元的偏置
+                        accumulator <= $signed(weight_rom[""" + str(layer2_bias_start) + """]);
+                    end else begin
+                        // 计算下一个神经元
+                        neuron_idx <= neuron_idx + 1;
+                        input_idx <= 0;
+                        state <= LAYER1_COMPUTE;
+                        // 加载下一个神经元的偏置
+                        accumulator <= $signed(weight_rom[""" + str(layer1_bias_start) + """ + neuron_idx + 1]);
                     end
                 end
 
-                DONE: begin
-                    // 找到最大值的索引
+                LAYER2_COMPUTE: begin
+                    // MAC操作: accumulator += (weight * layer1_out) >> 7
+                    // 读取Layer2权重
+                    accumulator <= accumulator + (($signed(weight_rom[""" + str(layer2_weights_start) + """ + neuron_idx * """ + str(hidden_size) + """ + input_idx]) * layer1_out[input_idx]) >>> 7);
+
+                    if (input_idx == """ + str(hidden_size - 1) + """) begin
+                        // 当前神经元计算完成
+                        layer2_out[neuron_idx] <= accumulator;
+
+                        if (neuron_idx == 9) begin
+                            // Layer2完成，进入argmax
+                            state <= ARGMAX;
+                        end else begin
+                            // 计算下一个神经元
+                            neuron_idx <= neuron_idx + 1;
+                            input_idx <= 0;
+                            // 加载下一个神经元的偏置
+                            accumulator <= $signed(weight_rom[""" + str(layer2_bias_start) + """ + neuron_idx + 1]);
+                        end
+                    end else begin
+                        // 继续计算下一个输入
+                        input_idx <= input_idx + 1;
+                    end
+                end
+
+                ARGMAX: begin
+                    // 找到最大值的索引（使用串行比较减少组合逻辑）
                     if (layer2_out[0] >= layer2_out[1] && layer2_out[0] >= layer2_out[2] &&
                         layer2_out[0] >= layer2_out[3] && layer2_out[0] >= layer2_out[4] &&
                         layer2_out[0] >= layer2_out[5] && layer2_out[0] >= layer2_out[6] &&
@@ -386,6 +457,25 @@ module mnist_model(
                         digit_out <= 9;
 
                     valid <= 1;
+                    state <= DONE;
+                end
+
+                DONE: begin
+                    // 保持结果直到下一次start
+                    valid <= 1;
+                    // 允许在DONE状态重新开始新的计算
+                    if (start) begin
+                        state <= LAYER1_COMPUTE;
+                        neuron_idx <= 0;
+                        input_idx <= 0;
+                        valid <= 0;
+                        digit_out <= 0;
+                        // 初始化累加器为第一个神经元的偏置
+                        accumulator <= $signed(weight_rom[""" + str(layer1_bias_start) + """]);
+                    end
+                end
+
+                default: begin
                     state <= IDLE;
                 end
             endcase
@@ -402,7 +492,12 @@ endmodule
     with open(os.path.join(verilog_dir, "mnist_model.v"), "w") as f:
         f.write(verilog_code)
 
-    print(f"Verilog模型已生成: {verilog_dir}/mnist_model.v")
+    print(f"Verilog模型已生成（串行架构，逻辑门优化）: {verilog_dir}/mnist_model.v")
+    print(f"  - 网络结构: 784 → {hidden_size} → 10")
+    print(f"  - 使用单个8位×32位MAC单元")
+    print(f"  - ROM大小: {total_rom_size} 字节 (Layer1: {layer1_bias_start + hidden_size}, Layer2: {10 * hidden_size + 10})")
+    print(f"  - 时钟周期: ~{hidden_size * 785 + 10 * (hidden_size + 1)} cycles")
+    print(f"  - 逻辑门数量: 大幅减少（相比全并行架构和16神经元版本）")
 
     # 生成测试文件（传入参数用于生成真实测试用例）
     generate_testbench(verilog_dir, params)
