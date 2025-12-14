@@ -9,8 +9,8 @@ import os
 class SimpleNet(nn.Module):
     def __init__(self):
         super(SimpleNet, self).__init__()
-        self.fc1 = nn.Linear(784, 6, bias=True)  # 6个隐藏层神经元，平衡准确率和资源
-        self.fc2 = nn.Linear(6, 10, bias=True)
+        self.fc1 = nn.Linear(784, 3, bias=True)  # 3个隐藏层神经元，激进优化资源使用
+        self.fc2 = nn.Linear(3, 10, bias=True)
 
     def forward(self, x):
         x = x.view(-1, 784)
@@ -232,7 +232,6 @@ def fine_tune_int8(params, iterations=3):
 
 def generate_verilog(params):
     """生成串行计算架构的Verilog代码 - 大幅减少逻辑门数量"""
-    print("\n生成串行计算架构Verilog代码（优化逻辑门使用）...")
 
     fc1_w = params['fc1_weight']  # shape: (16, 784)
     fc1_b = params['fc1_bias']    # shape: (16,)
@@ -253,48 +252,56 @@ def generate_verilog(params):
     total_rom_size = layer2_bias_start + 10
 
     verilog_code = f"""// MNIST手写数字识别模型 - Int8量化版本（串行计算架构）
-// 架构优化：使用单个MAC单元串行计算，大幅减少逻辑门数量
-// 网络结构: 784 → {hidden_size} → 10 (隐藏层神经元: {hidden_size})
+// MNIST手写数字识别模型 - Int8量化版本（高度优化串行架构）
+// 极致优化：3个隐藏神经元，24位累加器，最小化逻辑资源
+// 网络结构: 784 → {hidden_size} → 10
 // 输入: 28x28二值图像 (784位)
 // 输出: 预测数字 (0-9)
 // 时钟周期: ~{hidden_size * 785 + 10 * (hidden_size + 1)} cycles
-// ROM大小: {total_rom_size} bytes (Layer1: {layer1_bias_start + hidden_size}, Layer2: {10 * hidden_size + 10})"""
+// ROM大小: {total_rom_size} bytes
+// 优化目标: LUT < 6,272"""
 
     verilog_code += """
 
 module mnist_model(
     input wire clk,
     input wire rst,
-    input wire [783:0] image_in,  // 28*28 = 784位输入
+    input wire [783:0] image_in,
     input wire start,
-    output reg [3:0] digit_out,   // 输出数字 0-9
+    output reg [3:0] digit_out,
     output reg valid
 );
 
-    // 状态机
-    localparam IDLE = 3'd0;
-    localparam LAYER1_COMPUTE = 3'd1;
-    localparam LAYER1_ACTIVATE = 3'd2;
-    localparam LAYER2_COMPUTE = 3'd3;
-    localparam ARGMAX = 3'd4;
-    localparam DONE = 3'd5;
+    // 紧凑状态机 (2位足够5个状态)
+    localparam IDLE = 2'd0;
+    localparam LAYER1 = 2'd1;
+    localparam LAYER2 = 2'd2;
+    localparam ARGMAX = 2'd3;
 
-    reg [2:0] state;
-    reg [4:0] neuron_idx;       // 当前神经元索引
-    reg [9:0] input_idx;        // 当前输入索引 (0-783 for layer1)
+    reg [1:0] state;
+    reg [3:0] neuron_idx;    // 神经元索引 (0-9)
+    reg [9:0] input_idx;     // 输入索引 (0-783)
+    reg layer1_done;         // Layer1计算完成标志
 
-    // MAC单元
-    reg signed [31:0] accumulator; // 累加器（32位，保证数值稳定性）
+    // 24位累加器（减少寄存器使用）
+    reg signed [23:0] accumulator;
 
-    // 层输出存储
-    reg signed [31:0] layer1_out [0:"""
+    // 层输出存储（24位）
+    reg signed [23:0] layer1_out [0:"""
 
     verilog_code += f"{hidden_size-1}];\n"
-    verilog_code += f"""    reg signed [31:0] layer2_out [0:9];
+    verilog_code += f"""    reg signed [23:0] layer2_out [0:9];
 
-    // ROM: 存储所有权重和偏置 ({total_rom_size}个Int8参数)
-    // synthesis attribute: 强制使用Block RAM而不是分布式RAM
-    (* ram_style = "block" *) reg signed [7:0] weight_rom [0:{total_rom_size-1}];
+    // Argmax变量
+    reg [3:0] max_idx;
+    reg signed [23:0] max_val;
+
+    // ROM: 权重和偏置 ({total_rom_size}字节)
+    // 强制使用BRAM以节省LUT
+    (* ram_style = "block" *)
+    (* ramstyle = "M9K" *)
+    (* syn_ramstyle = "block_ram" *)
+    reg signed [7:0] weight_rom [0:{total_rom_size-1}];
 
     // 初始化ROM
     initial begin
@@ -338,146 +345,90 @@ module mnist_model(
             neuron_idx <= 0;
             input_idx <= 0;
             accumulator <= 0;
+            layer1_done <= 0;
         end else begin
             case (state)
                 IDLE: begin
                     valid <= 0;
-                    digit_out <= 0;
-                    neuron_idx <= 0;
-                    input_idx <= 0;
                     if (start) begin
-                        state <= LAYER1_COMPUTE;
-                        // 初始化累加器为第一个神经元的偏置
-                        accumulator <= $signed(weight_rom[""" + str(layer1_bias_start) + """]);
-                    end
-                end
-
-                LAYER1_COMPUTE: begin
-                    // MAC操作: accumulator += weight * input
-                    // 读取Layer1权重: 地址 = neuron_idx * 784 + input_idx
-                    accumulator <= accumulator + ($signed(weight_rom[neuron_idx * 784 + input_idx]) * $signed({31'b0, image_in[input_idx]}));
-
-                    if (input_idx == 783) begin
-                        // 当前神经元计算完成，进入激活
-                        state <= LAYER1_ACTIVATE;
-                        input_idx <= 0;
-                    end else begin
-                        // 继续计算下一个输入
-                        input_idx <= input_idx + 1;
-                    end
-                end
-
-                LAYER1_ACTIVATE: begin
-                    // ReLU激活
-                    if (accumulator < 0) begin
-                        layer1_out[neuron_idx] <= 0;
-                    end else begin
-                        layer1_out[neuron_idx] <= accumulator;
-                    end
-
-                    if (neuron_idx == """ + str(hidden_size - 1) + """) begin
-                        // Layer1完成，进入Layer2
-                        state <= LAYER2_COMPUTE;
+                        state <= LAYER1;
                         neuron_idx <= 0;
                         input_idx <= 0;
-                        // 初始化为Layer2第一个神经元的偏置
-                        accumulator <= $signed(weight_rom[""" + str(layer2_bias_start) + """]);
-                    end else begin
-                        // 计算下一个神经元
-                        neuron_idx <= neuron_idx + 1;
-                        input_idx <= 0;
-                        state <= LAYER1_COMPUTE;
-                        // 加载下一个神经元的偏置
-                        accumulator <= $signed(weight_rom[""" + str(layer1_bias_start) + """ + neuron_idx + 1]);
+                        layer1_done <= 0;
+                        accumulator <= $signed({{16{weight_rom[""" + str(layer1_bias_start) + """][7]}}, weight_rom[""" + str(layer1_bias_start) + """]});
                     end
                 end
 
-                LAYER2_COMPUTE: begin
-                    // MAC操作: accumulator += (weight * layer1_out) >> 7
-                    // 读取Layer2权重
-                    accumulator <= accumulator + (($signed(weight_rom[""" + str(layer2_weights_start) + """ + neuron_idx * """ + str(hidden_size) + """ + input_idx]) * layer1_out[input_idx]) >>> 7);
+                LAYER1: begin
+                    // Layer1 MAC: acc += weight * input
+                    if (input_idx < 784) begin
+                        accumulator <= accumulator + ($signed({{16{weight_rom[neuron_idx * 784 + input_idx][7]}}, weight_rom[neuron_idx * 784 + input_idx]}) * $signed({23'b0, image_in[input_idx]}));
+                        input_idx <= input_idx + 1;
+                    end else begin
+                        // ReLU并存储
+                        layer1_out[neuron_idx] <= (accumulator[23] == 1'b1) ? 24'b0 : accumulator;
 
-                    if (input_idx == """ + str(hidden_size - 1) + """) begin
-                        // 当前神经元计算完成
+                        if (neuron_idx == """ + str(hidden_size - 1) + """) begin
+                            // Layer1完成
+                            state <= LAYER2;
+                            neuron_idx <= 0;
+                            input_idx <= 0;
+                            accumulator <= $signed({{16{weight_rom[""" + str(layer2_bias_start) + """][7]}}, weight_rom[""" + str(layer2_bias_start) + """]});
+                        end else begin
+                            // 下一个神经元
+                            neuron_idx <= neuron_idx + 1;
+                            input_idx <= 0;
+                            accumulator <= $signed({{16{weight_rom[""" + str(layer1_bias_start) + """ + neuron_idx + 1][7]}}, weight_rom[""" + str(layer1_bias_start) + """ + neuron_idx + 1]});
+                        end
+                    end
+                end
+
+                LAYER2: begin
+                    // Layer2 MAC: acc += (weight * layer1_out) >> 7
+                    if (input_idx < """ + str(hidden_size) + """) begin
+                        accumulator <= accumulator + (($signed({{16{weight_rom[""" + str(layer2_weights_start) + """ + neuron_idx * """ + str(hidden_size) + """ + input_idx][7]}}, weight_rom[""" + str(layer2_weights_start) + """ + neuron_idx * """ + str(hidden_size) + """ + input_idx]}) * layer1_out[input_idx]) >>> 7);
+                        input_idx <= input_idx + 1;
+                    end else begin
+                        // 存储输出
                         layer2_out[neuron_idx] <= accumulator;
 
                         if (neuron_idx == 9) begin
                             // Layer2完成，进入argmax
                             state <= ARGMAX;
+                            neuron_idx <= 0;
+                            input_idx <= 0;
+                            max_idx <= 0;
+                            max_val <= layer2_out[0];
                         end else begin
-                            // 计算下一个神经元
+                            // 下一个神经元
                             neuron_idx <= neuron_idx + 1;
                             input_idx <= 0;
-                            // 加载下一个神经元的偏置
-                            accumulator <= $signed(weight_rom[""" + str(layer2_bias_start) + """ + neuron_idx + 1]);
+                            accumulator <= $signed({{16{weight_rom[""" + str(layer2_bias_start) + """ + neuron_idx + 1][7]}}, weight_rom[""" + str(layer2_bias_start) + """ + neuron_idx + 1]});
                         end
-                    end else begin
-                        // 继续计算下一个输入
-                        input_idx <= input_idx + 1;
                     end
                 end
 
                 ARGMAX: begin
-                    // 找到最大值的索引（使用串行比较减少组合逻辑）
-                    if (layer2_out[0] >= layer2_out[1] && layer2_out[0] >= layer2_out[2] &&
-                        layer2_out[0] >= layer2_out[3] && layer2_out[0] >= layer2_out[4] &&
-                        layer2_out[0] >= layer2_out[5] && layer2_out[0] >= layer2_out[6] &&
-                        layer2_out[0] >= layer2_out[7] && layer2_out[0] >= layer2_out[8] &&
-                        layer2_out[0] >= layer2_out[9])
-                        digit_out <= 0;
-                    else if (layer2_out[1] >= layer2_out[2] && layer2_out[1] >= layer2_out[3] &&
-                             layer2_out[1] >= layer2_out[4] && layer2_out[1] >= layer2_out[5] &&
-                             layer2_out[1] >= layer2_out[6] && layer2_out[1] >= layer2_out[7] &&
-                             layer2_out[1] >= layer2_out[8] && layer2_out[1] >= layer2_out[9])
-                        digit_out <= 1;
-                    else if (layer2_out[2] >= layer2_out[3] && layer2_out[2] >= layer2_out[4] &&
-                             layer2_out[2] >= layer2_out[5] && layer2_out[2] >= layer2_out[6] &&
-                             layer2_out[2] >= layer2_out[7] && layer2_out[2] >= layer2_out[8] &&
-                             layer2_out[2] >= layer2_out[9])
-                        digit_out <= 2;
-                    else if (layer2_out[3] >= layer2_out[4] && layer2_out[3] >= layer2_out[5] &&
-                             layer2_out[3] >= layer2_out[6] && layer2_out[3] >= layer2_out[7] &&
-                             layer2_out[3] >= layer2_out[8] && layer2_out[3] >= layer2_out[9])
-                        digit_out <= 3;
-                    else if (layer2_out[4] >= layer2_out[5] && layer2_out[4] >= layer2_out[6] &&
-                             layer2_out[4] >= layer2_out[7] && layer2_out[4] >= layer2_out[8] &&
-                             layer2_out[4] >= layer2_out[9])
-                        digit_out <= 4;
-                    else if (layer2_out[5] >= layer2_out[6] && layer2_out[5] >= layer2_out[7] &&
-                             layer2_out[5] >= layer2_out[8] && layer2_out[5] >= layer2_out[9])
-                        digit_out <= 5;
-                    else if (layer2_out[6] >= layer2_out[7] && layer2_out[6] >= layer2_out[8] &&
-                             layer2_out[6] >= layer2_out[9])
-                        digit_out <= 6;
-                    else if (layer2_out[7] >= layer2_out[8] && layer2_out[7] >= layer2_out[9])
-                        digit_out <= 7;
-                    else if (layer2_out[8] >= layer2_out[9])
-                        digit_out <= 8;
-                    else
-                        digit_out <= 9;
-
-                    valid <= 1;
-                    state <= DONE;
-                end
-
-                DONE: begin
-                    // 保持结果直到下一次start
-                    valid <= 1;
-                    // 允许在DONE状态重新开始新的计算
-                    if (start) begin
-                        state <= LAYER1_COMPUTE;
-                        neuron_idx <= 0;
+                    // 串行比较查找最大值
+                    if (input_idx == 0) begin
+                        // 初始化已在LAYER2完成
+                        input_idx <= 1;
+                    end else if (input_idx < 10) begin
+                        if (layer2_out[input_idx] > max_val) begin
+                            max_val <= layer2_out[input_idx];
+                            max_idx <= input_idx[3:0];
+                        end
+                        input_idx <= input_idx + 1;
+                    end else begin
+                        // 完成
+                        digit_out <= max_idx;
+                        valid <= 1;
+                        state <= IDLE;
                         input_idx <= 0;
-                        valid <= 0;
-                        digit_out <= 0;
-                        // 初始化累加器为第一个神经元的偏置
-                        accumulator <= $signed(weight_rom[""" + str(layer1_bias_start) + """]);
                     end
                 end
 
-                default: begin
-                    state <= IDLE;
-                end
+                default: state <= IDLE;
             endcase
         end
     end
@@ -492,18 +443,20 @@ endmodule
     with open(os.path.join(verilog_dir, "mnist_model.v"), "w") as f:
         f.write(verilog_code)
 
-    print(f"Verilog模型已生成（串行架构，逻辑门优化）: {verilog_dir}/mnist_model.v")
+    print(f"Verilog模型已生成（高度优化串行架构）: {verilog_dir}/mnist_model.v")
     print(f"  - 网络结构: 784 → {hidden_size} → 10")
-    print(f"  - 使用单个8位×32位MAC单元")
-    print(f"  - ROM大小: {total_rom_size} 字节 (Layer1: {layer1_bias_start + hidden_size}, Layer2: {10 * hidden_size + 10})")
+    print(f"  - 24位累加器，2位状态机")
+    print(f"  - ROM大小: {total_rom_size} 字节")
     print(f"  - 时钟周期: ~{hidden_size * 785 + 10 * (hidden_size + 1)} cycles")
-    print(f"  - 逻辑门数量: 大幅减少（相比全并行架构和16神经元版本）")
 
     # 生成测试文件（传入参数用于生成真实测试用例）
     generate_testbench(verilog_dir, params)
 
 def generate_testbench(verilog_dir, params):
     """生成Verilog测试文件（使用真实MNIST样本）"""
+
+    # 获取隐藏层大小
+    hidden_size = params['fc1_weight'].shape[0]
 
     # 加载测试数据
     transform = transforms.Compose([
@@ -601,9 +554,21 @@ module mnist_model_test;
             start = 1;
             #10 start = 0;
 
-            wait(valid);
-            $display("Test {idx+1}: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d, Layer1[3]=%d",
-                     uut.layer1_out[0], uut.layer1_out[1], uut.layer1_out[2], uut.layer1_out[3]);
+            wait(valid);"""
+
+        # 动态生成Layer1输出显示（根据隐藏层大小）
+        layer1_display = f"            $display(\"Test {idx+1}: "
+        for i in range(hidden_size):
+            layer1_display += f"Layer1[{i}]=%d, "
+        layer1_display = layer1_display.rstrip(", ") + "\","
+        for i in range(hidden_size):
+            layer1_display += f"\n                     uut.layer1_out[{i}]"
+            if i < hidden_size - 1:
+                layer1_display += ","
+        layer1_display += ");"
+
+        testbench += f"""
+{layer1_display}
             $display("         Layer2[0]=%d, [1]=%d, [2]=%d, [3]=%d, [4]=%d",
                      uut.layer2_out[0], uut.layer2_out[1], uut.layer2_out[2], uut.layer2_out[3], uut.layer2_out[4]);
             $display("         Layer2[5]=%d, [6]=%d, [7]=%d, [8]=%d, [9]=%d",
