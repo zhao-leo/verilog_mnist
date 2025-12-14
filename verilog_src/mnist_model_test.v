@@ -43,8 +43,10 @@ module mnist_model_test;
             #10 start = 0;
 
             wait(valid);
-            $display("Test 1: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d, Layer1[3]=%d",
-                     uut.layer1_out[0], uut.layer1_out[1], uut.layer1_out[2], uut.layer1_out[3]);
+            $display("Test 1: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d",
+                     uut.layer1_out[0],
+                     uut.layer1_out[1],
+                     uut.layer1_out[2]);
             $display("         Layer2[0]=%d, [1]=%d, [2]=%d, [3]=%d, [4]=%d",
                      uut.layer2_out[0], uut.layer2_out[1], uut.layer2_out[2], uut.layer2_out[3], uut.layer2_out[4]);
             $display("         Layer2[5]=%d, [6]=%d, [7]=%d, [8]=%d, [9]=%d",
@@ -61,8 +63,10 @@ module mnist_model_test;
             #10 start = 0;
 
             wait(valid);
-            $display("Test 2: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d, Layer1[3]=%d",
-                     uut.layer1_out[0], uut.layer1_out[1], uut.layer1_out[2], uut.layer1_out[3]);
+            $display("Test 2: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d",
+                     uut.layer1_out[0],
+                     uut.layer1_out[1],
+                     uut.layer1_out[2]);
             $display("         Layer2[0]=%d, [1]=%d, [2]=%d, [3]=%d, [4]=%d",
                      uut.layer2_out[0], uut.layer2_out[1], uut.layer2_out[2], uut.layer2_out[3], uut.layer2_out[4]);
             $display("         Layer2[5]=%d, [6]=%d, [7]=%d, [8]=%d, [9]=%d",
@@ -79,8 +83,10 @@ module mnist_model_test;
             #10 start = 0;
 
             wait(valid);
-            $display("Test 3: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d, Layer1[3]=%d",
-                     uut.layer1_out[0], uut.layer1_out[1], uut.layer1_out[2], uut.layer1_out[3]);
+            $display("Test 3: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d",
+                     uut.layer1_out[0],
+                     uut.layer1_out[1],
+                     uut.layer1_out[2]);
             $display("         Layer2[0]=%d, [1]=%d, [2]=%d, [3]=%d, [4]=%d",
                      uut.layer2_out[0], uut.layer2_out[1], uut.layer2_out[2], uut.layer2_out[3], uut.layer2_out[4]);
             $display("         Layer2[5]=%d, [6]=%d, [7]=%d, [8]=%d, [9]=%d",
@@ -97,8 +103,10 @@ module mnist_model_test;
             #10 start = 0;
 
             wait(valid);
-            $display("Test 4: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d, Layer1[3]=%d",
-                     uut.layer1_out[0], uut.layer1_out[1], uut.layer1_out[2], uut.layer1_out[3]);
+            $display("Test 4: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d",
+                     uut.layer1_out[0],
+                     uut.layer1_out[1],
+                     uut.layer1_out[2]);
             $display("         Layer2[0]=%d, [1]=%d, [2]=%d, [3]=%d, [4]=%d",
                      uut.layer2_out[0], uut.layer2_out[1], uut.layer2_out[2], uut.layer2_out[3], uut.layer2_out[4]);
             $display("         Layer2[5]=%d, [6]=%d, [7]=%d, [8]=%d, [9]=%d",
@@ -115,8 +123,10 @@ module mnist_model_test;
             #10 start = 0;
 
             wait(valid);
-            $display("Test 5: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d, Layer1[3]=%d",
-                     uut.layer1_out[0], uut.layer1_out[1], uut.layer1_out[2], uut.layer1_out[3]);
+            $display("Test 5: Layer1[0]=%d, Layer1[1]=%d, Layer1[2]=%d",
+                     uut.layer1_out[0],
+                     uut.layer1_out[1],
+                     uut.layer1_out[2]);
             $display("         Layer2[0]=%d, [1]=%d, [2]=%d, [3]=%d, [4]=%d",
                      uut.layer2_out[0], uut.layer2_out[1], uut.layer2_out[2], uut.layer2_out[3], uut.layer2_out[4]);
             $display("         Layer2[5]=%d, [6]=%d, [7]=%d, [8]=%d, [9]=%d",
