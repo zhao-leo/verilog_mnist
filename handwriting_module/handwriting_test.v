@@ -17,7 +17,7 @@ module handwriting_test;
     reg direct_start;
     wire [3:0] direct_digit_out;
     wire direct_valid;
-    
+
     mnist_model direct_mnist (
         .clk(clk),
         .rst(rst),
@@ -78,14 +78,14 @@ module handwriting_test;
             #10 clk = 1;
             #10 clk = 0;
             direct_start = 0;
-            
+
             // 等待计算完成
             while (direct_valid == 0) begin
                 #10 clk = 1;
                 #10 clk = 0;
             end
-            
-            $display("直接测试%0d: 识别结果=%0d (期望=%0d) %s", 
+
+            $display("直接测试%0d: 识别结果=%0d (期望=%0d) %s",
                      test_id, direct_digit_out, expected,
                      (direct_digit_out == expected) ? "PASS" : "FAIL");
         end
@@ -97,23 +97,23 @@ module handwriting_test;
         input integer expected;
         input integer test_id;
         begin
-            
+
             // ARM开始提供时钟并发送数据
             // 关键时序：先设置数据，让数据稳定，然后产生时钟上升沿采样
             for (i = 0; i < 784; i = i + 1) begin
                 // 1. 确保时钟为低
                 clk = 0;
                 #5;  // 等待时钟稳定在低电平
-                
+
                 // 2. 在时钟低电平期间设置数据
                 data_in = image_data[i];
                 #5;  // 给数据足够的建立时间(setup time)
-                
+
                 // 3. 产生上升沿，FPGA在此采样稳定的数据
                 clk = 1;
                 #10; // 保持高电平
             end
-            
+
             // 继续提供时钟等待计算完成
             while (busy == 1) begin
                 clk = 0;
@@ -121,7 +121,7 @@ module handwriting_test;
                 clk = 1;
                 #10;
             end
-            
+
             // 计算完成，读取结果
             if (result_valid == 1) begin
                 if (digit_out == expected)
@@ -131,7 +131,7 @@ module handwriting_test;
             end else begin
                 $display("handwriting测试%0d ERROR: result_valid=0", test_id);
             end
-            
+
             // ARM停止时钟
             clk = 0;
             #100; // 停止时钟一段时间
@@ -140,13 +140,17 @@ module handwriting_test;
 
     // 测试流程
     initial begin
+        // 导出波形文件
+        $dumpfile("handwriting_test.vcd");
+        $dumpvars(0, handwriting_test);
+        
         // 初始化
         clk = 0;
         rst = 0;
         data_in = 0;
         direct_image = 784'b0;
         direct_start = 0;
-        
+
         $display("=== 先用直接mnist_model测试所有样本 ===");
         for (test_num = 0; test_num < 5; test_num = test_num + 1) begin
             rst = 1;
@@ -154,7 +158,7 @@ module handwriting_test;
             #20;
             direct_test(test_images[test_num], expected_results[test_num], test_num + 1);
         end
-        
+
         $display("\n=== 再用handwriting模块测试所有样本 ===");
         // 测试5个样本
         for (test_num = 0; test_num < 5; test_num = test_num + 1) begin
@@ -164,13 +168,12 @@ module handwriting_test;
             clk = 0;
             #20 rst = 0;
             #40;  // 复位后等待更长时间让状态稳定
-            
+
             // ARM发送数据
             arm_send_data(test_images[test_num], expected_results[test_num], test_num + 1);
         end
-        
+
         $display("\n所有测试完成");
         $finish;
     end
-
 endmodule

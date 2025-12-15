@@ -39,8 +39,8 @@ def train_model():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    # 训练12个epoch
-    for epoch in range(12):
+    # 训练20个epoch
+    for epoch in range(20):
         model.train()
         for batch_idx, (data, target) in enumerate(train_loader):
             optimizer.zero_grad()

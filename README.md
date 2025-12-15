@@ -2,50 +2,11 @@
 
 基于Int8量化神经网络的MNIST手写数字识别系统，针对资源受限FPGA进行极致优化。
 
-## 📋 项目概述
+## 项目概述
 
 本项目实现了一个完整的MNIST手写数字识别系统，从PyTorch模型训练到Verilog硬件描述语言的自动生成，专门针对小型FPGA（6,272 LUT）进行了深度优化。
 
-### 核心特性
-
-- ✅ **极致资源优化**: 3个隐藏神经元，ROM仅2,395字节
-- ✅ **Int8量化**: 8位整数运算，硬件友好
-- ✅ **串行架构**: 单MAC单元时分复用，大幅降低逻辑资源
-- ✅ **自动化流程**: 从训练到Verilog一键生成
-- ✅ **完整验证**: 包含testbench和仿真测试
-
-### 性能指标
-
-| 指标 | 数值 |
-|------|------|
-| 网络结构 | 784 → 3 → 10 |
-| 准确率 | ~77% (Int8量化后) |
-| ROM大小 | 2,395 字节 |
-| 推理延迟 | ~2,395 时钟周期 |
-| 目标LUT | < 6,272 |
-| 累加器位宽 | 24位 |
-
-## 🏗️ 项目结构
-
-```
-verilog_minist/
-├── mnist_model/           # PyTorch模型训练和Verilog生成
-│   ├── main.py           # 主程序（训练+量化+生成）
-│   ├── .venv/            # Python虚拟环境
-│   └── data/             # MNIST数据集（自动下载）
-├── verilog_src/          # 生成的Verilog代码
-│   ├── mnist_model.v     # MNIST推理模块
-│   ├── mnist_model_test.v # 测试bench
-│   └── test.sh           # 仿真测试脚本
-├── handwriting_module/   # ARM接口顶层模块
-│   ├── handwriting.v     # 串行接收+推理
-│   ├── handwriting_test.v # 顶层测试
-│   ├── ram.v             # 图像缓存RAM
-│   └── README.md         # 接口说明
-└── README.md             # 本文件
-```
-
-## 🚀 快速开始
+## 快速开始
 
 ### 环境要求
 
@@ -114,7 +75,7 @@ Verilog中已包含属性：
 (* syn_ramstyle = "block_ram" *) reg signed [7:0] weight_rom [0:2394];
 ```
 
-## 📡 接口说明
+## 接口说明
 
 ### mnist_model 模块
 
@@ -134,8 +95,6 @@ module mnist_model(
 2. 拉高`start`一个时钟周期
 3. 等待`valid`信号拉高
 4. 读取`digit_out`结果
-
-**时序**：约2,400个时钟周期完成一次推理
 
 ### handwriting 顶层模块
 
